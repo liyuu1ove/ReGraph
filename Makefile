@@ -5,7 +5,7 @@ TARGETS := hw
 #   hw_emu
 # 	export XCL_EMULATION_MODE hw_emu
 
-APP := pr
+APP := bfs
 # pass in by app=
 
 DEVICES := xilinx_u280_xdma_201920_3

@@ -16,7 +16,7 @@
 #include "partition_schedule.h"
 #include "verify.h"
 
-
+static constexpr int concurrence_num = 2;
 using namespace std;
 
 int main(int argc, char **argv) {
@@ -37,53 +37,59 @@ int main(int argc, char **argv) {
         gName = "./dataset/rmat-19-32.txt";              
         std::cout << gName <<" (a small graph) is selected for faster execution on emulation flow." << std::endl;
     }
+    // ******** Create the CSR vector *******//
+    vector<CSR*> csr_list;
+    csr_list.reserve(concurrence_num);
 
     // ******** Create the CSR for the selected graph and destory the raw graph data to release memory *******//
-    DEBUG_PRINTF("Create the CSR for the selected graph and destory the raw graph data to release memory...\n");
-    Graph* gptr = createGraph(gName, path_graph_dataset);
     
-    CSR* csr = createCsr(gptr);
-    int num_vertex = csr->vertexNum;    
-    int num_edge = csr->edgeNum;
+    for (int i =0;i<concurrence_num;i++){
+    DEBUG_PRINTF("Create the CSR for the selected graph and destory the raw graph data to release memory...CONCURRENCE:%d\n",i);
+    Graph* gptr = createGraph(gName, path_graph_dataset);
+    csr_list[i] = createCsr(gptr);
+    int num_vertex = csr_list[i]->vertexNum;    
+    int num_edge = csr_list[i]->edgeNum;
 
     int edges_size_in_MB = num_edge*8/1024/1024;
     int vertex_size_in_MB = num_vertex*4/1024/1024;
     std::cout << "Edges (assuming 8 bytes per edge) occupy " << edges_size_in_MB << " MB capacity!" << std::endl;
     std::cout << "Vertices (assuming 4 bytes per vertex) occupy " << vertex_size_in_MB << " MB capacity!" << std::endl;
     std::cout << "Combined: " << (edges_size_in_MB+vertex_size_in_MB) << " MB capacity!" << std::endl;
-    if((edges_size_in_MB+vertex_size_in_MB)/1024 > 8){
+    
+    if((edges_size_in_MB+vertex_size_in_MB)*concurrence_num/1024 > 8){
         std::cout << gName << " edges exceeds HBM capacity... exit..." <<std::endl;
         exit(-1);
-    }
+    }}
     //********************************************************************************************************//
-
+    int num_vertex = csr_list[0]->vertexNum;
+    int num_edge = csr_list[0]->edgeNum;
     //******************************************** Reorder graph *********************************************//
+    for (int i =0;i<concurrence_num;i++){
 #if VERTEX_REORDER_ENABLE == 1
     DEBUG_PRINTF("[INFO] Reordering graph...\n");
-    reorderGraph(csr);
+    reorderGraph(csr_list[i]);
 #endif
     //********************************************************************************************************//
 
 // for(int numD = 0; numD < 40; numD ++){
     //*************************************** initializeProperty *********************************************//
     DEBUG_PRINTF("Initialize vertex property...\n");
-    initializeProperty(csr);
+    initializeProperty(csr_list[i]);
     //********************************************************************************************************//
 
     // ********************* create acceleration context and kernels... **************************************//
     DEBUG_PRINTF("Initialize the accelerator and create kernels...\n");
-    acc_descriptor_dt acc = initAccelerator(xcl_file); 
+    acc_descriptor_dt acc = initAccelerator(xcl_file);
     // *******************************************************************************************************//
 
     //******************************* Conduct graph partitioning *********************************************//
     DEBUG_PRINTF("Partitioning graph...\n");
-    partition_container_dt partition_container = partitionGraph(csr);
+    partition_container_dt partition_container = partitionGraph(csr_list[i]);
     //********************************************************************************************************//
     
     int numD = 1;
-        
     if(argc > 3) numD = atoi(argv[3]);
-     
+
     partition_container.num_dense_partitions = numD;
     // if(partition_container.num_dense_partitions > partition_container.num_partitions) return 1;
     //******************************* Schedule Partitions to kernels *****************************************//
@@ -115,7 +121,7 @@ int main(int argc, char **argv) {
         OCL_CHECK(err, err = acc.hbm_krnl.setArg(argvi++, partition_container.num_dense_partitions)); // one kernel has one src_prop array
         OCL_CHECK(err, err = acc.hbm_krnl.setArg(argvi++, partition_container.num_sparse_partitions)); // one kernel has one src_prop array
         // Invoking the kernel
-        OCL_CHECK(err, err = acc.hbm_queue.enqueueTask(acc.hbm_krnl, NULL, &acc.hbm_event));                
+        OCL_CHECK(err, err = acc.hbm_queue.enqueueTask(acc.hbm_krnl, NULL, &acc.hbm_event));          
 
         // enqueue the apply kernel
         argvi = 0;
@@ -174,109 +180,110 @@ int main(int argc, char **argv) {
         //     std::cout << " " << std::left << std::setw(20) << gName << " e2e high_resolution_clock time : " << kernel_time_in_sec * 1000 \
         //     << " ms; Throughput : " << (double)num_edge/ kernel_time_in_sec/1000000.0 << "MTEPS" << std::endl;           
     }
+}
     //********************************************************************************************************//
 
     // ******************************* profile execution time of each partition ******************************//
     
-    std::vector<unsigned long> sum_exe_time_little_kernel(NUM_KERNEL,0);
-    for (uint i = 0; i < partition_container.num_dense_partitions; i++){        
-        unsigned long longest_exetime = 0; 
-        unsigned long sum_exetime = 0; 
-        for(uint subpart_id = 0; subpart_id < partition_container.DP[i].num_subpartitions; subpart_id ++){
-            unsigned long start, stop;
+    // std::vector<unsigned long> sum_exe_time_little_kernel(NUM_KERNEL,0);
+    // for (uint i = 0; i < partition_container.num_dense_partitions; i++){        
+    //     unsigned long longest_exetime = 0; 
+    //     unsigned long sum_exetime = 0; 
+    //     for(uint subpart_id = 0; subpart_id < partition_container.DP[i].num_subpartitions; subpart_id ++){
+    //         unsigned long start, stop;
 
-            OCL_CHECK(err, 
-                    err = partition_container.DP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
-                        CL_PROFILING_COMMAND_START, &start));
-            OCL_CHECK(err,
-                    err = partition_container.DP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
-                        CL_PROFILING_COMMAND_END, &stop));
-            unsigned long exe_time = stop - start;
+    //         OCL_CHECK(err, 
+    //                 err = partition_container.DP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
+    //                     CL_PROFILING_COMMAND_START, &start));
+    //         OCL_CHECK(err,
+    //                 err = partition_container.DP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
+    //                     CL_PROFILING_COMMAND_END, &stop));
+    //         unsigned long exe_time = stop - start;
 
-            sum_exe_time_little_kernel[partition_container.DP[i].subP[subpart_id].kernel_id] += exe_time;
+    //         sum_exe_time_little_kernel[partition_container.DP[i].subP[subpart_id].kernel_id] += exe_time;
             
-            if(exe_time > longest_exetime) longest_exetime = exe_time;
-            sum_exetime += exe_time;
+    //         if(exe_time > longest_exetime) longest_exetime = exe_time;
+    //         sum_exetime += exe_time;
 
-            std::cout << "[PROFILE]" <<  " DP " << std::setw(3) << i << " subP " << subpart_id <<" : "\
-            << std::setw(2) << partition_container.DP[i].subP[subpart_id].kernel_id << " krnl id; " \
-            << std::setw(8) << (double)partition_container.DP[i].subP[subpart_id].num_edges/exe_time*1000.0 << " MTEPS; "\
-            << std::setw(8) << partition_container.DP[i].subP[subpart_id].num_edges << " partition edges;  " \
-            << std::endl;             
-        }
-        std::cout << "[PROFILE]" <<  " DP " << std::setw(3) << i <<" : "\
-        << std::setw(3) << (double)sum_exetime/(longest_exetime *  partition_container.DP[i].num_subpartitions) * 100.0 << "% utilization; "\
-        << std::endl;    
-    }
-    unsigned long little_kernel_exe_time = *max_element(sum_exe_time_little_kernel.begin(), sum_exe_time_little_kernel.end());
-    std::cout   << "[INFO]" <<  " little kernel: " << " executed dense partitions: " << partition_container.num_dense_partitions <<", overall time " \
-                << *max_element(sum_exe_time_little_kernel.begin(), sum_exe_time_little_kernel.end()) / 1000000.0 \
-                << " ms; " << std::endl;   
+    //         std::cout << "[PROFILE]" <<  " DP " << std::setw(3) << i << " subP " << subpart_id <<" : "\
+    //         << std::setw(2) << partition_container.DP[i].subP[subpart_id].kernel_id << " krnl id; " \
+    //         << std::setw(8) << (double)partition_container.DP[i].subP[subpart_id].num_edges/exe_time*1000.0 << " MTEPS; "\
+    //         << std::setw(8) << partition_container.DP[i].subP[subpart_id].num_edges << " partition edges;  " \
+    //         << std::endl;             
+    //     }
+    //     std::cout << "[PROFILE]" <<  " DP " << std::setw(3) << i <<" : "\
+    //     << std::setw(3) << (double)sum_exetime/(longest_exetime *  partition_container.DP[i].num_subpartitions) * 100.0 << "% utilization; "\
+    //     << std::endl;    
+    // }
+    // unsigned long little_kernel_exe_time = *max_element(sum_exe_time_little_kernel.begin(), sum_exe_time_little_kernel.end());
+    // std::cout   << "[INFO]" <<  " little kernel: " << " executed dense partitions: " << partition_container.num_dense_partitions <<", overall time " \
+    //             << *max_element(sum_exe_time_little_kernel.begin(), sum_exe_time_little_kernel.end()) / 1000000.0 \
+    //             << " ms; " << std::endl;   
 
 
-    std::vector<unsigned long> sum_exe_time_big_kernel(NUM_KERNEL,0);
-    for (uint i = 0; i < partition_container.num_sparse_partitions; i++){
-        unsigned long longest_exetime = 0; 
-        unsigned long sum_exetime = 0;
-        for(uint subpart_id = 0; subpart_id < partition_container.SP[i].num_subpartitions; subpart_id ++){
-            unsigned long start, stop;
+    // std::vector<unsigned long> sum_exe_time_big_kernel(NUM_KERNEL,0);
+    // for (uint i = 0; i < partition_container.num_sparse_partitions; i++){
+    //     unsigned long longest_exetime = 0; 
+    //     unsigned long sum_exetime = 0;
+    //     for(uint subpart_id = 0; subpart_id < partition_container.SP[i].num_subpartitions; subpart_id ++){
+    //         unsigned long start, stop;
 
-            OCL_CHECK(err, 
-                    err = partition_container.SP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
-                        CL_PROFILING_COMMAND_START, &start));
-            OCL_CHECK(err,
-                    err = partition_container.SP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
-                        CL_PROFILING_COMMAND_END, &stop));
-            unsigned long exe_time = stop - start;
+    //         OCL_CHECK(err, 
+    //                 err = partition_container.SP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
+    //                     CL_PROFILING_COMMAND_START, &start));
+    //         OCL_CHECK(err,
+    //                 err = partition_container.SP[i].subP[subpart_id].event.getProfilingInfo<unsigned long>(
+    //                     CL_PROFILING_COMMAND_END, &stop));
+    //         unsigned long exe_time = stop - start;
 
-            sum_exe_time_big_kernel[partition_container.SP[i].subP[subpart_id].kernel_id - LITTLE_KERNEL_NUM] += exe_time;
+    //         sum_exe_time_big_kernel[partition_container.SP[i].subP[subpart_id].kernel_id - LITTLE_KERNEL_NUM] += exe_time;
             
-            if(exe_time > longest_exetime) longest_exetime = exe_time;
-            sum_exetime += exe_time;
+    //         if(exe_time > longest_exetime) longest_exetime = exe_time;
+    //         sum_exetime += exe_time;
 
-            std::cout << "[PROFILE]" <<  " SP " << std::setw(3) << i << " subP " << subpart_id <<" : "\
-            << std::setw(2) <<partition_container.SP[i].subP[subpart_id].kernel_id << " krnl id; " \
-            << std::setw(8) << (double)partition_container.SP[i].subP[subpart_id].num_edges/exe_time*1000.0 << " MTEPS; "\
-            << std::setw(8) << partition_container.SP[i].subP[subpart_id].num_edges << " partition edges;  " \
-            << std::endl;             
-        }
+    //         std::cout << "[PROFILE]" <<  " SP " << std::setw(3) << i << " subP " << subpart_id <<" : "\
+    //         << std::setw(2) <<partition_container.SP[i].subP[subpart_id].kernel_id << " krnl id; " \
+    //         << std::setw(8) << (double)partition_container.SP[i].subP[subpart_id].num_edges/exe_time*1000.0 << " MTEPS; "\
+    //         << std::setw(8) << partition_container.SP[i].subP[subpart_id].num_edges << " partition edges;  " \
+    //         << std::endl;             
+    //     }
 
-        std::cout << "[PROFILE]" <<  " SP " << std::setw(3) << i <<" : "\
-        << std::setw(3) << (double)sum_exetime/(longest_exetime *  partition_container.SP[i].num_subpartitions) * 100.0 << "% utilization; "\
-        << std::endl;    
-    }
-    unsigned long big_kernel_exe_time = *max_element(sum_exe_time_big_kernel.begin(), sum_exe_time_big_kernel.end());
-    std::cout   << "[INFO]" <<  " big kernel " << " executed sparse partitions " << partition_container.num_sparse_partitions <<", overall time " \
-                << *max_element(sum_exe_time_big_kernel.begin(), sum_exe_time_big_kernel.end()) / 1000000.0 \
-                << " ms; " << std::endl;   
+    //     std::cout << "[PROFILE]" <<  " SP " << std::setw(3) << i <<" : "\
+    //     << std::setw(3) << (double)sum_exetime/(longest_exetime *  partition_container.SP[i].num_subpartitions) * 100.0 << "% utilization; "\
+    //     << std::endl;    
+    // }
+    // unsigned long big_kernel_exe_time = *max_element(sum_exe_time_big_kernel.begin(), sum_exe_time_big_kernel.end());
+    // std::cout   << "[INFO]" <<  " big kernel " << " executed sparse partitions " << partition_container.num_sparse_partitions <<", overall time " \
+    //             << *max_element(sum_exe_time_big_kernel.begin(), sum_exe_time_big_kernel.end()) / 1000000.0 \
+    //             << " ms; " << std::endl;   
     
-    unsigned long event_e2e_exe_time = (big_kernel_exe_time > little_kernel_exe_time)? big_kernel_exe_time : little_kernel_exe_time;
-    std::cout << "[INFO] " << std::setw(20) << gName \
-        << ",  numD: " << numD \
-        << ",  e2e: " << kernel_time_in_sec * 1000.0 \
-        << " ms;  Throught: " << (double)num_edge/ kernel_time_in_sec/1000000.0 \
-        << " MTEPS : " << std::endl;      
-    //********************************************************************************************************//
+    // unsigned long event_e2e_exe_time = (big_kernel_exe_time > little_kernel_exe_time)? big_kernel_exe_time : little_kernel_exe_time;
+    // std::cout << "[INFO] " << std::setw(20) << gName \
+    //     << ",  numD: " << numD \
+    //     << ",  e2e: " << kernel_time_in_sec * 1000.0 \
+    //     << " ms;  Throught: " << (double)num_edge/ kernel_time_in_sec/1000000.0 \
+    //     << " MTEPS : " << std::endl;      
+    // //********************************************************************************************************//
 
-    //******************************************* verifyResults **********************************************//
-    verifyResults(partition_container, acc, csr);
-    //********************************************************************************************************//   
+    // //******************************************* verifyResults **********************************************//
+    // //verifyResults(partition_container, acc, csr_list[0]);
+    // //********************************************************************************************************//   
 
-    //**************** free resources ************************************************************************//
+    // //**************** free resources ************************************************************************//
     
-    for (uint i = 0; i < partition_container.num_dense_partitions; i++){
-        //partition_container.P[i].edge_array_host.clear();
-        for(uint subpart_id = 0; subpart_id < partition_container.DP[i].num_subpartitions; subpart_id ++){
-            partition_container.DP[i].subP[subpart_id].edge_array_host.clear();
-        }
-    }
+    // for (uint i = 0; i < partition_container.num_dense_partitions; i++){
+    //     //partition_container.P[i].edge_array_host.clear();
+    //     for(uint subpart_id = 0; subpart_id < partition_container.DP[i].num_subpartitions; subpart_id ++){
+    //         partition_container.DP[i].subP[subpart_id].edge_array_host.clear();
+    //     }
+    // }
 
-    for (uint i = 0; i < partition_container.num_sparse_partitions; i++){
-        partition_container.SP[i].edge_array_host.clear();
-        for(uint subpart_id = 0; subpart_id < partition_container.SP[i].num_subpartitions; subpart_id ++){
-            partition_container.SP[i].subP[subpart_id].edge_array_host.clear();
-        }    
-    }
+    // for (uint i = 0; i < partition_container.num_sparse_partitions; i++){
+    //     partition_container.SP[i].edge_array_host.clear();
+    //     for(uint subpart_id = 0; subpart_id < partition_container.SP[i].num_subpartitions; subpart_id ++){
+    //         partition_container.SP[i].subP[subpart_id].edge_array_host.clear();
+    //     }    
+    // }
 // }
     //********************************************************************************************************//   
 
