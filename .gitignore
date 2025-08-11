@@ -8,3 +8,4 @@ output
 host_graph_fpga_pr
 host_graph_fpga_bfs
 xclbin_hw_bfs
+*.test
